@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
@@ -44,23 +45,35 @@ func worker(start, end string, caseSensitive bool, results chan<- [2]string, wg 
 			address := pubKey.String()
 			atomic.AddUint64(attempts, 1)
 			if isMatch(address, start, end, caseSensitive) {
-				results <- [2]string{address, privKey.String()}
-				return
+				select {
+				case results <- [2]string{address, privKey.String()}:
+					return
+				case <-done:
+					return
+				}
 			}
 		}
 	}
 }
 
 func main() {
-	var start, end string
-	var caseSensitive bool
+	start := flag.String("s", "", "The starting string of the address")
+	end := flag.String("e", "", "The ending string of the address")
+	threads := flag.Int("t", int(float64(runtime.NumCPU())*float64(0.5)), "The number of threads to use")
+	caseSensitive := flag.Bool("c", false, "Case sensitive match")
 
-	fmt.Print("Enter the start of the address: ")
-	fmt.Scanln(&start)
-	fmt.Print("Enter the end of the address: ")
-	fmt.Scanln(&end)
-	fmt.Print("Case sensitive? (true/false): ")
-	fmt.Scanln(&caseSensitive)
+	flag.Parse()
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "-h" {
+		flag.Usage()
+		os.Exit(0)
+	}
 
 	wsClient, err := ws.Connect(context.Background(), rpc.MainNetBeta_WS)
 	if err != nil {
@@ -69,11 +82,17 @@ func main() {
 	}
 	defer wsClient.Close()
 
-	numWorkers := int(float64(runtime.NumCPU()) * float64(0.5))
+	// Determina il numero di worker
+	numWorkers := 1
+	if *start != "" || *end != "" || *caseSensitive {
+		numWorkers = *threads
+	}
+
 	results := make(chan [2]string)
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	var attempts uint64
+	var once sync.Once
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
@@ -91,11 +110,11 @@ func main() {
 	fmt.Printf("Starting with %d threads\n", numWorkers)
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker(start, end, caseSensitive, results, &wg, &attempts, done)
+		go worker(*start, *end, *caseSensitive, results, &wg, &attempts, done)
 	}
 
 	foundResult := <-results
-	close(done)
+	once.Do(func() { close(done) })
 	fmt.Printf("Found matching address: %s\n", foundResult[0])
 	fmt.Printf("Private key: %s\n", foundResult[1])
 
